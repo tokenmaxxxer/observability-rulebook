@@ -1,0 +1,7 @@
+{
+  "name": "observability-methodology-selector",
+  "description": "Governs only the phase-1 methodology-selection procedure: classifies each touched surface into request-driven/resource-bound/service-rollup and requires naming exactly one of RED/USE/Golden Signals per surface — does not implement any signal methodology itself.",
+  "author": {
+    "name": "Jung Jiwon & Lee Jongkwan"
+  }
+}

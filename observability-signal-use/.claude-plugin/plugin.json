@@ -1,0 +1,7 @@
+{
+  "name": "observability-signal-use",
+  "description": "Single signal-selection methodology: USE (Utilization/Saturation/Errors) for resource-bound surfaces only. Phase-2 only — requires all three USE signals be named explicitly with a concrete instrumentation point when a phase-2 record adopts USE for a surface.",
+  "author": {
+    "name": "Jung Jiwon & Lee Jongkwan"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "name": "observability-signal-red",
+  "description": "Single methodology RED (Rate/Errors/Duration) for request-driven surfaces only, phase-2 only.",
+  "author": {
+    "name": "Jung Jiwon & Lee Jongkwan"
+  }
+}

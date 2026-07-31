@@ -1,0 +1,7 @@
+{
+  "name": "observability-cardinality-budget",
+  "description": "Methodology-agnostic cross-cutting norm: requires a high-cardinality dimension list plus an explicit handling policy, at both phase-1 (preliminary) and phase-2 (confirmed) — applies regardless of which signal methodology (RED/USE/Golden Signals) is chosen.",
+  "author": {
+    "name": "Jung Jiwon & Lee Jongkwan"
+  }
+}

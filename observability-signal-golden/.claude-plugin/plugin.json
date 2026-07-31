@@ -1,0 +1,7 @@
+{
+  "name": "observability-signal-golden",
+  "description": "Single methodology: Golden Signals (Latency/Traffic/Errors/Saturation) for service-rollup surfaces only, phase-2 only.",
+  "author": {
+    "name": "Jung Jiwon & Lee Jongkwan"
+  }
+}

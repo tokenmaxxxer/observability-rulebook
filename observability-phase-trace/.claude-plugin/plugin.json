@@ -1,0 +1,7 @@
+{
+  "name": "observability-phase-trace",
+  "description": "Methodology-agnostic cross-cutting norm: checks that phase-2's adopted methodology traces back to what phase-1 committed to (an ordering constraint, tracked as state rather than prose). Carries HAND-OFF timing guidance only in its directive — no signal or cardinality norms of its own.",
+  "author": {
+    "name": "Jung Jiwon & Lee Jongkwan"
+  }
+}
