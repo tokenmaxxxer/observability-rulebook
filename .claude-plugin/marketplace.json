@@ -1,0 +1,13 @@
+{
+  "name": "tokenmaxxxer-observability",
+  "owner": {
+    "name": "tokenmaxxxer"
+  },
+  "plugins": [
+    {
+      "name": "observability",
+      "source": "./observability",
+      "description": "The observability role on contract v3 (issue-160 round-4 promotion). Decides: 프로덕션 내부 상태에 대해 사전에 정의하지 않은 질문도 던질 수 있는가."
+    }
+  ]
+}

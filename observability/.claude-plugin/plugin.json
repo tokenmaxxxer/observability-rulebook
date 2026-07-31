@@ -1,0 +1,7 @@
+{
+  "name": "observability",
+  "description": "The observability role on contract v3: 프로덕션 내부 상태에 대해 사전에 정의하지 않은 질문도 던질 수 있는가. use_when: 신규 서비스/경로에 계측이 필요할 때. Hand-off: 장애가 실제로 발생하면 → incident-response.",
+  "author": {
+    "name": "Jung Jiwon & Lee Jongkwan"
+  }
+}
