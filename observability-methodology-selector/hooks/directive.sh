@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+. "${CLAUDE_PLUGIN_ROOT_CORE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../core" && pwd -P)}/hooks/lib/role-directive.sh"
+core_role_directive "YOU DECIDE: 이 phase-1 proposal이 다루는 각 surface를 request-driven/resource-bound/service-rollup 중 어디로 분류할 것인가" "USE WHEN: 신규 서비스/경로 계측 설계를 시작할 때, phase-1 proposal 작성 시점" "PRODUCES: touched surface별로 표면 분류(request-driven/resource-bound/service-rollup) 하나를 명시하고, 그 분류에 대응하는 신호 방법론 정확히 하나(request-driven→RED, resource-bound→USE, service-rollup→Golden Signals)를 이름으로 명명할 것 — 이 플러그인은 그 명명이 존재하는지만 요구하며 RED/USE/Golden Signals 각각의 내용(구체적 신호 정의·계측 규칙)은 정의하지 않는다(각 신호 방법론 형제 플러그인의 책임)" "HAND-OFF: 장애가 실제로 발생하면 → incident-response"

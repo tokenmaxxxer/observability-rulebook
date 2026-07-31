@@ -1,0 +1,7 @@
+{
+  "name": "observability-explorability",
+  "description": "Methodology-agnostic cross-cutting norm: the instrumentation design must remain queryable for questions not defined in advance — an ad-hoc query capability, not just pre-built dashboards.",
+  "author": {
+    "name": "Jung Jiwon & Lee Jongkwan"
+  }
+}

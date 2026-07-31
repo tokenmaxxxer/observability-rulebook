@@ -7,7 +7,42 @@
     {
       "name": "observability",
       "source": "./observability",
-      "description": "The observability role on contract v3 (issue-160 round-4 promotion). Decides: 프로덕션 내부 상태에 대해 사전에 정의하지 않은 질문도 던질 수 있는가."
+      "description": "Role entry point on contract v3 (issue-7 scope narrowing): role-level directive naming what this role decides/hands off and pointing at the methodology and cross-cutting plugins below. Signal-methodology and cross-cutting produces norms live in the plugins listed next, not here."
+    },
+    {
+      "name": "observability-methodology-selector",
+      "source": "./observability-methodology-selector",
+      "description": "Phase-1 methodology-selection procedure: classify each surface (request-driven/resource-bound/service-rollup) and name exactly one signal methodology (RED/USE/Golden Signals) — does not implement any signal methodology itself."
+    },
+    {
+      "name": "observability-signal-red",
+      "source": "./observability-signal-red",
+      "description": "RED (Rate/Errors/Duration) for request-driven surfaces only. Phase-2 only: requires all three signals named with a concrete instrumentation point each."
+    },
+    {
+      "name": "observability-signal-use",
+      "source": "./observability-signal-use",
+      "description": "USE (Utilization/Saturation/Errors) for resource-bound surfaces only. Phase-2 only: requires all three signals named with a concrete instrumentation point each."
+    },
+    {
+      "name": "observability-signal-golden",
+      "source": "./observability-signal-golden",
+      "description": "Golden Signals (Latency/Traffic/Errors/Saturation) for service-rollup surfaces only. Phase-2 only: requires all four signals named with a concrete instrumentation point each."
+    },
+    {
+      "name": "observability-cardinality-budget",
+      "source": "./observability-cardinality-budget",
+      "description": "Methodology-agnostic cross-cutting norm: high-cardinality dimension list (preliminary at phase-1, confirmed + handling policy at phase-2) with placeholder-rejection."
+    },
+    {
+      "name": "observability-explorability",
+      "source": "./observability-explorability",
+      "description": "Methodology-agnostic cross-cutting norm: keep the instrumentation queryable for un-predefined questions (phase-1 one-line check, phase-2 requires a concrete ad-hoc query example)."
+    },
+    {
+      "name": "observability-phase-trace",
+      "source": "./observability-phase-trace",
+      "description": "Methodology-agnostic cross-cutting norm: phase-2's adopted methodology must trace to what phase-1 named — ordering constraint tracked as state, consumed here, written by observability-methodology-selector."
     }
   ]
 }

@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+. "${CLAUDE_PLUGIN_ROOT_CORE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../core" && pwd -P)}/hooks/lib/role-directive.sh"
+core_role_directive "YOU DECIDE: resource-bound 표면에 USE(Utilization/Saturation/Errors) 3신호 계측을 어디에 배치할 것인가" "USE WHEN: phase-1이 이 표면에 USE를 선택했을 때, phase-2 산출물 작성 시점" "PRODUCES: phase-2 record/proposal은 USE 3신호 각각을 명시적으로 이름 붙이고 신호별 구체적 계측 지점을 제시해야 함 — utilization: 어떤 리소스 지표를 볼 것인지, saturation: 어떤 큐/백로그 신호를 볼 것인지, errors: 어떤 리소스 레벨 에러를 볼 것인지" "HAND-OFF: 장애가 실제로 발생하면 → incident-response"
