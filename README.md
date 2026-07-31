@@ -20,13 +20,19 @@ claude plugin install observability
 ## Layout
 
 - `observability/.claude-plugin/plugin.json` — plugin manifest
-- `observability/hooks/hooks.json` — SessionStart + PreToolUse wiring
-- `observability/hooks/directive.sh` — SessionStart role directive
-- `observability/hooks/record-fields-gate.sh` — this role's record required-field gate
-- `observability/hooks/trailer-gate.sh` — commit `Subject: issue-<n>` trailer gate
-- `observability/hooks/handbook-trigger-gate.sh` — s21 handbook-sync gate
-- `observability/agents/warrant-hunter.md` — rotating-stance hunt agent
+- `observability/hooks/hooks.json` — SessionStart wiring (`directive.sh` only)
+- `observability/hooks/directive.sh` — role-directive stub: sources core
+  canon's `core/hooks/lib/role-directive.sh` and passes this role's four
+  doctrine values
 - `docs/specs/approvers.md` — Approve-authority allowlist (see below)
+
+The role-agnostic gates (`trailer-gate.sh`, `record-fields-gate.sh`,
+`handbook-trigger-gate.sh`) and the `warrant-hunter` hunt agent are no
+longer vendored here. They are core canon now (core issue #63/#66):
+`core/hooks/hooks.json` fires the three gates for every plugin install,
+and `warrant`'s hunter installs independently. This repo stopped shipping
+per-role copies of both (issue-66 survey found ~43 near-identical copies
+repo-wide) — see `docs/issue-2/proposals/2026-07-31-core-canon-reference-switch.md`.
 
 This is scaffolding, not a finished rulebook: fill in doctrine detail,
 handoff enforcement, and any role-specific progress gate before treating
