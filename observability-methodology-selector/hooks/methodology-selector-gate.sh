@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-__fc(){ rc=$?; if [ "$rc" != 0 ] && [ "$rc" != 2 ]; then echo "fail-closed: gate aborted (rc=$rc)" >&2; exit 2; fi; }
-trap __fc EXIT
-# PreToolUse gate (Write|Edit|MultiEdit) — methodology-selector only.
+. "${CLAUDE_PLUGIN_ROOT_CORE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../core" && pwd -P)}/hooks/lib/gate-lib.sh"
+gate_trap_fail_closed
+set -uo pipefail
+gate_kill_switch_active "${OBSERVABILITY_METHODOLOGY_SELECTOR_GATE_OFF:-}" || { trap - EXIT; exit 0; }
+# PreToolUse gate (Write|Edit|MultiEdit|NotebookEdit) — methodology-selector only.
 #
 # On a write whose resolved target is docs/issue-<n>/proposals/*observability*.md
 # (the phase-1 proposal surface only — this plugin does not touch the
@@ -12,16 +14,13 @@ trap __fc EXIT
 # .observability-phase1-methods/<issue-n>.json for observability-phase-trace
 # to consume later.
 #
-# Kill switch: export OBSERVABILITY_METHODOLOGY_SELECTOR_GATE_OFF=1
-set -uo pipefail
+# Kill switch: export OBSERVABILITY_METHODOLOGY_SELECTOR_GATE_OFF=1 (or
+# true/yes/on, case-insensitive) to disable. Any other value, including an
+# unrecognized typo, keeps the gate active (fail closed on kill-switch
+# ambiguity — see gate-lib.sh gate_kill_switch_active).
 
 role="${CLAUDE_ROLE:-observability}"
-deny() { echo "${role}: refused — $1" >&2; exit 2; }
-
-case "${OBSERVABILITY_METHODOLOGY_SELECTOR_GATE_OFF:-}" in
-  ""|0|false|no|off) ;;
-  *) exit 0 ;;
-esac
+deny() { gate_deny "$role" "$1"; }
 
 command -v python3 >/dev/null 2>&1 || deny "methodology-selector-gate.sh requires python3, which is not on PATH; denying rather than guessing."
 
@@ -43,13 +42,11 @@ _plausible() { [ -n "$1" ] && [ -d "$1" ] && { [ -e "$1/.git" ] || [ -f "$1/docs
 _under() {
   [ -z "$2" ] && return 0
   python3 -c '
-import os,posixpath,sys
-r,t=sys.argv[1],sys.argv[2]
-try: rr=posixpath.normpath(os.path.realpath(r).replace("\\","/"))
-except Exception: sys.exit(1)
-n=t.replace("\\","/"); a=n if posixpath.isabs(n) else posixpath.join(rr,n)
-a=posixpath.normpath(a); real=posixpath.normpath(os.path.realpath(a).replace("\\","/"))
-sys.exit(0 if (real==rr or real.startswith(rr+"/")) else 1)
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("gate_lib", os.environ["GATE_LIB_PY"])
+gate_lib = importlib.util.module_from_spec(spec); spec.loader.exec_module(gate_lib)
+root = os.path.realpath(sys.argv[1])
+sys.exit(0 if gate_lib.gate_normalize_path(root, sys.argv[2]) is not None else 1)
 ' "$1" "$2"
 }
 
@@ -64,7 +61,7 @@ fi
 [ -z "$root" ] && root="$(git -C "$(pwd -P)" rev-parse --show-toplevel 2>/dev/null || true)"
 [ -z "$root" ] && deny "no project root could be determined; failing closed (produces-shape check cannot run)."
 
-MSG_PAYLOAD="$payload" MSG_ROOT="$root" MSG_ROLE="$role" \
+MSG_PAYLOAD="$payload" MSG_ROOT="$root" MSG_ROLE="$role" GLPY="$GATE_LIB_PY" \
 python3 <<'PY'
 import sys as _fc_sys  # fail-closed-on-internal-error
 try:
@@ -72,16 +69,18 @@ try:
 
     role = os.environ["MSG_ROLE"]
 
+    import importlib.util
+    _spec = importlib.util.spec_from_file_location("gate_lib", os.environ["GLPY"])
+    gate_lib = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(gate_lib)
+
     def deny(m):
         sys.stderr.write("%s: refused — %s\n" % (role, m)); sys.exit(2)
 
+    def allow():
+        sys.exit(0)
+
     raw = os.environ.get("MSG_PAYLOAD", "")
-    try:
-        ev = json.loads(raw) if raw else {}
-    except ValueError:
-        deny("the tool-call payload is not valid JSON; the gate cannot judge the produces shape on an unparseable write.")
-    if not isinstance(ev, dict):
-        deny("the tool-call payload is not a JSON object; failing closed on produces shape.")
+    ev = gate_lib.gate_parse_json_or_deny(raw, deny)
 
     tool = ev.get("tool_name")
     ti = ev.get("tool_input")
@@ -92,32 +91,27 @@ try:
     PROPOSAL_RE = re.compile(r'^docs/issue-[0-9]+/proposals/.*observability.*\.md$')
     ISSUE_RE = re.compile(r'issue-([0-9]+)')
 
-    def resolve(p):
-        n = p.replace("\\", "/")
-        a = n if posixpath.isabs(n) else posixpath.join(root, n)
-        a = posixpath.normpath(a)
-        try:
-            return posixpath.normpath(os.path.realpath(a).replace("\\", "/"))
-        except OSError:
-            return a
-
-    # Only Write/Edit/MultiEdit reach the record in a form whose full
-    # resulting content we can read. Everything else is out of this
-    # gate's scope and passed through.
+    # Only Write/Edit/MultiEdit/NotebookEdit reach the record in a form
+    # whose full resulting content we can read. Everything else is out of
+    # this gate's scope and passed through.
     path = None
     if tool in ("Write", "Edit", "MultiEdit"):
         p = ti.get("file_path")
         if isinstance(p, str) and p:
             path = p
+    elif tool == "NotebookEdit":
+        p = ti.get("notebook_path")
+        if isinstance(p, str) and p:
+            path = p
     if path is None:
         sys.exit(0)
 
-    r = resolve(path)
-    if not r.startswith(root + "/"):
+    rel = gate_lib.gate_normalize_path(root, path)
+    if rel is None:
         sys.exit(0)
-    rel = r[len(root):].lstrip("/")
     if not PROPOSAL_RE.match(rel):
         sys.exit(0)  # not the phase-1 proposal surface — not this gate's business
+    r = posixpath.join(root, rel) if rel else root
 
     current = None
     if os.path.isfile(r):
@@ -127,49 +121,80 @@ try:
         except OSError:
             deny("%s exists but cannot be read; failing closed on the produces-shape check." % rel)
 
-    new_text = None
-    if tool == "Write":
-        c = ti.get("content")
-        if isinstance(c, str):
-            new_text = c
-    elif tool == "Edit":
-        o, n = ti.get("old_string"), ti.get("new_string")
-        if isinstance(o, str) and isinstance(n, str) and current is not None and o in current:
-            new_text = current.replace(o, n, 1)
-    elif tool == "MultiEdit":
-        edits = ti.get("edits")
-        text = current
-        if isinstance(edits, list) and text is not None:
-            ok = True
-            for e in edits:
-                if not isinstance(e, dict):
-                    ok = False; break
-                o, n = e.get("old_string"), e.get("new_string")
-                if not isinstance(o, str) or not isinstance(n, str) or o not in text:
-                    ok = False; break
-                text = text.replace(o, n, 1)
-            if ok:
-                new_text = text
-
-    if new_text is None:
+    new_text, ok = gate_lib.gate_reconstruct_write(tool, ti, current)
+    if not ok:
         deny(
-            "this write targets %s but the gate cannot determine the resulting content "
-            "from the tool input (tool=%r). Write the full proposal with Write, or use an "
-            "Edit/MultiEdit whose old_string matches, so the methodology-selection shape can be checked." % (rel, tool)
+            "this write targets %s but the gate cannot determine the resulting content from the tool input "
+            "(tool=%r, replace_all honored). Write the full file with Write, or use an Edit/MultiEdit whose "
+            "old_string matches, so the shape can be checked." % (rel, tool)
         )
 
-    low = new_text.lower()
+    # --- semantic check: section-scoped, with bounded-window fallback ---
+    #
+    # This record type (a phase-1 proposal) has no fixed heading set, so a
+    # heading match is the exception rather than the rule for this gate.
+    # We first try to find a markdown section (^#{1,6}\s+heading) whose
+    # heading text names the topic; if none matches — the common case —
+    # we fall back to a bounded 3-line window around the first
+    # topic-adjacent mention anywhere in the document. Only if the topic
+    # is not mentioned at all do we treat it as missing, unchanged from
+    # the pre-migration whole-document behavior.
+    HEADING_RE = re.compile(r'^#{1,6}\s+(.*)$', re.MULTILINE)
 
-    def has_any(*needles):
+    def split_sections(text):
+        """Return [(heading_text_or_None, body_text), ...]. The first
+        element covers any preamble before the first heading (heading is
+        None)."""
+        matches = list(HEADING_RE.finditer(text))
+        if not matches:
+            return [(None, text)]
+        sections = []
+        pre = text[:matches[0].start()]
+        if pre.strip():
+            sections.append((None, pre))
+        for i, m in enumerate(matches):
+            heading = m.group(1)
+            body_start = m.end()
+            body_end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+            sections.append((heading, text[body_start:body_end]))
+        return sections
+
+    def section_scoped(text, topic_words):
+        for heading, body in split_sections(text):
+            if heading and any(w in heading.lower() for w in topic_words):
+                return body
+        # Fallback: bounded 3-line window around the first topic-adjacent
+        # mention in the whole document (primary path for this gate).
+        lines = text.split("\n")
+        for i, line in enumerate(lines):
+            low_line = line.lower()
+            if any(w in low_line for w in topic_words):
+                start = max(0, i - 1)
+                end = min(len(lines), i + 2)
+                return "\n".join(lines[start:end])
+        return ""  # no mention at all — treated as missing, same as before
+
+    def has_any(text, *needles):
+        low = text.lower()
         return any(nd in low for nd in needles)
 
     missing = []
-    if not has_any("red method", "use method", "golden signals", "golden signal",
-                    "rate/errors/duration", "red (rate", "red(rate", " red/", "/red ",
-                    "red 방법", "use 방법"):
+
+    methodology_needles = (
+        "red method", "use method", "golden signals", "golden signal",
+        "rate/errors/duration", "red (rate", "red(rate", " red/", "/red ",
+        "red 방법", "use 방법",
+    )
+    methodology_topic_words = ("methodology", "method", "signal", "red", "use", "golden")
+    if not has_any(section_scoped(new_text, methodology_topic_words), *methodology_needles):
         missing.append("signal-methodology-name (RED/USE/Golden Signals 중 하나를 명명해야 함)")
-    if not has_any("request-driven", "request driven", "resource-bound", "resource bound",
-                   "service-rollup", "service rollup", "요청 기반", "자원 기반", "서비스 롤업"):
+
+    surface_needles = (
+        "request-driven", "request driven", "resource-bound", "resource bound",
+        "service-rollup", "service rollup", "요청 기반", "자원 기반", "서비스 롤업",
+    )
+    surface_topic_words = ("surface", "classification", "classify", "표면", "분류")
+    if not has_any(section_scoped(new_text, surface_topic_words), *surface_needles):
         missing.append("surface-classification (request-driven/resource-bound/service-rollup 중 하나로 표면을 분류해야 함)")
 
     if missing:

@@ -1,26 +1,28 @@
 #!/usr/bin/env bash
-__fc(){ rc=$?; if [ "$rc" != 0 ] && [ "$rc" != 2 ]; then echo "fail-closed: gate aborted (rc=$rc)" >&2; exit 2; fi; }
-trap __fc EXIT
-# PreToolUse gate (Write|Edit|MultiEdit) — role-owned, single methodology
-# (Golden Signals: Latency/Traffic/Errors/Saturation), phase-2 only.
+. "${CLAUDE_PLUGIN_ROOT_CORE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../core" && pwd -P)}/hooks/lib/gate-lib.sh"
+gate_trap_fail_closed
+set -uo pipefail
+gate_kill_switch_active "${OBSERVABILITY_SIGNAL_GOLDEN_GATE_OFF:-}" || { trap - EXIT; exit 0; }
+
+# PreToolUse gate (Write|Edit|MultiEdit|NotebookEdit) — role-owned, single
+# methodology (Golden Signals: Latency/Traffic/Errors/Saturation),
+# phase-2 only.
 #
 # On a write whose resolved target is docs/issue-<n>/reports/observability.md,
 # parse the PROPOSED content. If the text does not mention Golden Signals
 # being adopted for some surface, this gate is a no-op (other methodology
 # plugins own that record's other content). If Golden Signals is mentioned
 # as adopted, require all four signal classes (latency/traffic/errors/
-# saturation) to appear explicitly.
+# saturation) to appear explicitly within the record's Golden Signals
+# section (or a bounded window around the first mention, if no matching
+# heading exists).
 #
-# Kill switch: export OBSERVABILITY_SIGNAL_GOLDEN_GATE_OFF=1
-set -uo pipefail
+# Kill switch: export OBSERVABILITY_SIGNAL_GOLDEN_GATE_OFF=1 (or
+# true/yes/on, case-insensitive; any other value, including a typo, keeps
+# the gate active).
 
 role="${CLAUDE_ROLE:-observability}"
-deny() { echo "${role}: refused — $1" >&2; exit 2; }
-
-case "${OBSERVABILITY_SIGNAL_GOLDEN_GATE_OFF:-}" in
-  ""|0|false|no|off) ;;
-  *) exit 0 ;;
-esac
+deny() { gate_deny "$role" "$1"; }
 
 command -v python3 >/dev/null 2>&1 || deny "signal-golden-gate.sh requires python3, which is not on PATH; denying rather than guessing."
 
@@ -42,13 +44,11 @@ _plausible() { [ -n "$1" ] && [ -d "$1" ] && { [ -e "$1/.git" ] || [ -f "$1/docs
 _under() {
   [ -z "$2" ] && return 0
   python3 -c '
-import os,posixpath,sys
-r,t=sys.argv[1],sys.argv[2]
-try: rr=posixpath.normpath(os.path.realpath(r).replace("\\","/"))
-except Exception: sys.exit(1)
-n=t.replace("\\","/"); a=n if posixpath.isabs(n) else posixpath.join(rr,n)
-a=posixpath.normpath(a); real=posixpath.normpath(os.path.realpath(a).replace("\\","/"))
-sys.exit(0 if (real==rr or real.startswith(rr+"/")) else 1)
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("gate_lib", os.environ["GATE_LIB_PY"])
+gate_lib = importlib.util.module_from_spec(spec); spec.loader.exec_module(gate_lib)
+root = os.path.realpath(sys.argv[1])
+sys.exit(0 if gate_lib.gate_normalize_path(root, sys.argv[2]) is not None else 1)
 ' "$1" "$2"
 }
 
@@ -63,7 +63,7 @@ fi
 [ -z "$root" ] && root="$(git -C "$(pwd -P)" rev-parse --show-toplevel 2>/dev/null || true)"
 [ -z "$root" ] && deny "no project root could be determined; failing closed (produces-shape check cannot run)."
 
-SG_PAYLOAD="$payload" SG_ROOT="$root" SG_ROLE="$role" \
+SG_PAYLOAD="$payload" SG_ROOT="$root" SG_ROLE="$role" GLPY="$GATE_LIB_PY" \
 python3 <<'PY'
 import sys as _fc_sys  # fail-closed-on-internal-error
 try:
@@ -71,16 +71,18 @@ try:
 
     role = os.environ["SG_ROLE"]
 
+    import importlib.util
+    _spec = importlib.util.spec_from_file_location("gate_lib", os.environ["GLPY"])
+    gate_lib = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(gate_lib)
+
     def deny(m):
         sys.stderr.write("%s: refused — %s\n" % (role, m)); sys.exit(2)
 
+    def allow():
+        sys.exit(0)
+
     raw = os.environ.get("SG_PAYLOAD", "")
-    try:
-        ev = json.loads(raw) if raw else {}
-    except ValueError:
-        deny("the tool-call payload is not valid JSON; the gate cannot judge the produces shape on an unparseable write.")
-    if not isinstance(ev, dict):
-        deny("the tool-call payload is not a JSON object; failing closed on produces shape.")
+    ev = gate_lib.gate_parse_json_or_deny(raw, deny)
 
     tool = ev.get("tool_name")
     ti = ev.get("tool_input")
@@ -90,32 +92,25 @@ try:
     root = posixpath.normpath(os.environ["SG_ROOT"].replace("\\", "/"))
     RECORD_RE = re.compile(r'^docs/issue-[0-9]+/reports/observability\.md$')
 
-    def resolve(p):
-        n = p.replace("\\", "/")
-        a = n if posixpath.isabs(n) else posixpath.join(root, n)
-        a = posixpath.normpath(a)
-        try:
-            return posixpath.normpath(os.path.realpath(a).replace("\\", "/"))
-        except OSError:
-            return a
-
-    # Only Write/Edit/MultiEdit reach the record in a form whose full
-    # resulting content we can read. Everything else is out of this
-    # gate's scope and passed through.
+    # Only Write/Edit/MultiEdit/NotebookEdit reach the record in a form
+    # whose full resulting content we can read. Everything else is out of
+    # this gate's scope and passed through.
     path = None
     if tool in ("Write", "Edit", "MultiEdit"):
         p = ti.get("file_path")
-        if isinstance(p, str) and p:
-            path = p
+        if isinstance(p, str) and p: path = p
+    elif tool == "NotebookEdit":
+        p = ti.get("notebook_path")
+        if isinstance(p, str) and p: path = p
     if path is None:
         sys.exit(0)
 
-    r = resolve(path)
-    if not r.startswith(root + "/"):
+    rel = gate_lib.gate_normalize_path(root, path)
+    if rel is None:
         sys.exit(0)
-    rel = r[len(root):].lstrip("/")
     if not RECORD_RE.match(rel):
         sys.exit(0)  # not the phase-2 observability record — not this gate's business
+    r = posixpath.join(root, rel) if rel else root
 
     current = None
     if os.path.isfile(r):
@@ -125,57 +120,65 @@ try:
         except OSError:
             deny("%s exists but cannot be read; failing closed on the Golden Signals produces check." % rel)
 
-    new_text = None
-    if tool == "Write":
-        c = ti.get("content")
-        if isinstance(c, str):
-            new_text = c
-    elif tool == "Edit":
-        o, n = ti.get("old_string"), ti.get("new_string")
-        if isinstance(o, str) and isinstance(n, str) and current is not None and o in current:
-            new_text = current.replace(o, n, 1)
-    elif tool == "MultiEdit":
-        edits = ti.get("edits")
-        text = current
-        if isinstance(edits, list) and text is not None:
-            ok = True
-            for e in edits:
-                if not isinstance(e, dict):
-                    ok = False; break
-                o, n = e.get("old_string"), e.get("new_string")
-                if not isinstance(o, str) or not isinstance(n, str) or o not in text:
-                    ok = False; break
-                text = text.replace(o, n, 1)
-            if ok:
-                new_text = text
-
-    if new_text is None:
+    new_text, ok = gate_lib.gate_reconstruct_write(tool, ti, current)
+    if not ok:
         deny(
             "this write targets %s but the gate cannot determine the resulting content "
-            "from the tool input (tool=%r). Write the full record with Write, or use an "
-            "Edit/MultiEdit whose old_string matches, so the Golden Signals produces shape "
-            "can be checked." % (rel, tool)
+            "from the tool input (tool=%r, replace_all honored). Write the full file with "
+            "Write, or use an Edit/MultiEdit whose old_string matches, so the Golden "
+            "Signals produces shape can be checked." % (rel, tool)
         )
 
-    low = new_text.lower()
-
-    def has_any(*needles):
-        return any(nd in low for nd in needles)
+    def has_any_in(text, *needles):
+        t = text.lower()
+        return any(nd in t for nd in needles)
 
     # Only applies if Golden Signals is mentioned as the adopted methodology
     # for some surface. Other methodologies (RED/USE) are out of scope for
-    # this plugin — no-op rather than false-positive deny.
-    if not has_any("golden signal", "golden signals"):
+    # this plugin — no-op rather than false-positive deny. This trigger
+    # check stays whole-document: cheap, low false-positive risk, and it is
+    # detecting the methodology name itself, not judging its content.
+    if not has_any_in(new_text, "golden signal", "golden signals"):
         sys.exit(0)
 
+    # Locate the section whose heading matches this gate's topic, and run
+    # the four signal-presence checks against that section's body only.
+    HEADING_RE = re.compile(r'^#{1,6}\s+(.*)$', re.MULTILINE)
+    heads = list(HEADING_RE.finditer(new_text))
+    section_body = None
+    for i, m in enumerate(heads):
+        heading_text = m.group(1)
+        if "golden signal" in heading_text.lower():
+            start = m.end()
+            end = heads[i + 1].start() if i + 1 < len(heads) else len(new_text)
+            section_body = new_text[start:end]
+            break
+
+    if section_body is None:
+        # Fallback: no matching heading — use a bounded 3-line window
+        # around the first topic mention.
+        lines = new_text.splitlines()
+        low_lines = [ln.lower() for ln in lines]
+        idx = None
+        for i, ln in enumerate(low_lines):
+            if "golden signal" in ln:
+                idx = i
+                break
+        if idx is None:
+            section_body = new_text
+        else:
+            lo = max(0, idx - 1)
+            hi = min(len(lines), idx + 2)
+            section_body = "\n".join(lines[lo:hi])
+
     missing = []
-    if not has_any("latency", "지연"):
+    if not has_any_in(section_body, "latency", "지연"):
         missing.append("latency (지연 계측 지점 명시 필요)")
-    if not has_any("traffic", "트래픽", "throughput"):
+    if not has_any_in(section_body, "traffic", "트래픽", "throughput"):
         missing.append("traffic (트래픽/throughput 계측 지점 명시 필요)")
-    if not has_any("error", "에러", "오류"):
+    if not has_any_in(section_body, "error", "에러", "오류"):
         missing.append("errors (에러/오류 계측 지점 명시 필요)")
-    if not has_any("saturation", "포화"):
+    if not has_any_in(section_body, "saturation", "포화"):
         missing.append("saturation (포화 계측 지점 명시 필요)")
 
     if missing:
