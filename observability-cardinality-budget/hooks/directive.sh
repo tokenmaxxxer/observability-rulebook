@@ -1,3 +1,3 @@
 #!/usr/bin/env bash
-. "${CLAUDE_PLUGIN_ROOT_CORE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../core" && pwd -P)}/hooks/lib/role-directive.sh"
+. "${CLAUDE_PLUGIN_ROOT_CORE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../core" && pwd -P)}/hooks/lib/role-directive.sh" || { echo "directive.sh: cannot source role-directive.sh" >&2; exit 2; }
 core_role_directive "YOU DECIDE: 이 계측이 만들 시계열 카디널리티를 사전에 예산화했는가" "USE WHEN: phase-1: 예비 고카디널리티 후보 목록 작성 시 / phase-2: 확정 목록과 처리 방침 작성 시" "PRODUCES: phase-1: 폭발 가능성이 있는 고카디널리티 후보 차원(label/tag 후보, 예: user_id, request_id, raw URL path)의 예비 목록. phase-2: 확정된 차원 목록 + 차원별 명시적 처리 방침(drop/hash/bucket/aggregate-away) — 카디널리티 진술에 바로 인접한 'N/A'/'해당 없음'/'TBD' 류 자리표시자는 거부" "HAND-OFF: 장애가 실제로 발생하면 → incident-response"

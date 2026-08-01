@@ -1,16 +1,22 @@
 #!/usr/bin/env bash
-. "${CLAUDE_PLUGIN_ROOT_CORE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../core" && pwd -P)}/hooks/lib/gate-lib.sh"
+. "${CLAUDE_PLUGIN_ROOT_CORE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../core" && pwd -P)}/hooks/lib/gate-lib.sh" || { echo "methodology-selector-gate.sh: cannot source gate-lib.sh" >&2; exit 2; }
 gate_trap_fail_closed
 set -uo pipefail
 gate_kill_switch_active "${OBSERVABILITY_METHODOLOGY_SELECTOR_GATE_OFF:-}" || { trap - EXIT; exit 0; }
-# PreToolUse gate (Write|Edit|MultiEdit|NotebookEdit) — methodology-selector only.
+# PreToolUse gate (Write|Edit|MultiEdit|NotebookEdit|Bash) — methodology-selector only.
 #
 # On a write whose resolved target is docs/issue-<n>/proposals/*observability*.md
 # (the phase-1 proposal surface only — this plugin does not touch the
 # phase-2 record), parse the PROPOSED content and require both a named
 # signal methodology (RED/USE/Golden Signals) and a named surface
-# classification (request-driven/resource-bound/service-rollup). On a
-# passing write, best-effort record the pass into
+# classification (request-driven/resource-bound/service-rollup). A Bash
+# command whose target resolves onto this surface is denied outright, since
+# this gate cannot inspect a Bash-authored write's resulting content.
+#
+# This gate only judges the write; it does not record state. See the
+# sibling PostToolUse script methodology-selector-status.sh, which
+# independently re-derives the pass/fail judgment after the write has
+# actually completed and best-effort records it into
 # .observability-phase1-methods/<issue-n>.json for observability-phase-trace
 # to consume later.
 #
@@ -95,6 +101,7 @@ try:
     # whose full resulting content we can read. Everything else is out of
     # this gate's scope and passed through.
     path = None
+    is_bash = False
     if tool in ("Write", "Edit", "MultiEdit"):
         p = ti.get("file_path")
         if isinstance(p, str) and p:
@@ -103,6 +110,15 @@ try:
         p = ti.get("notebook_path")
         if isinstance(p, str) and p:
             path = p
+    elif tool == "Bash":
+        cmd = ti.get("command")
+        if isinstance(cmd, str) and cmd:
+            for token in gate_lib.gate_bash_write_targets(cmd):
+                cand_rel = gate_lib.gate_normalize_path(root, token)
+                if cand_rel and PROPOSAL_RE.match(cand_rel):
+                    path = token
+                    is_bash = True
+                    break
     if path is None:
         sys.exit(0)
 
@@ -111,6 +127,12 @@ try:
         sys.exit(0)
     if not PROPOSAL_RE.match(rel):
         sys.exit(0)  # not the phase-1 proposal surface — not this gate's business
+    if is_bash:
+        deny(
+            "this Bash command appears to write %s; the produces-shape check cannot inspect "
+            "a Bash-authored write's resulting content — use Write/Edit/MultiEdit for this "
+            "path instead." % rel
+        )
     r = posixpath.join(root, rel) if rel else root
 
     current = None
@@ -204,19 +226,6 @@ try:
             "phase-1 proposal must classify each touched surface and name exactly one signal "
             "methodology for it." % "; ".join(missing)
         )
-
-    # Passing write: best-effort record state for observability-phase-trace to consume later.
-    m = ISSUE_RE.search(rel)
-    if m:
-        issue_n = m.group(1)
-        try:
-            state_dir = posixpath.join(root, ".observability-phase1-methods")
-            os.makedirs(state_dir, exist_ok=True)
-            state_path = posixpath.join(state_dir, "%s.json" % issue_n)
-            with open(state_path, "w", encoding="utf-8") as fh:
-                json.dump({"issue": issue_n, "methodology_named": True}, fh)
-        except OSError:
-            pass  # best-effort only; does not fail the gate
 
     sys.exit(0)
 except Exception as _fc_e:  # fail-closed-on-internal-error

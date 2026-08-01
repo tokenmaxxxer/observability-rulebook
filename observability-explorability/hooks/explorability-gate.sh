@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-. "${CLAUDE_PLUGIN_ROOT_CORE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../core" && pwd -P)}/hooks/lib/gate-lib.sh"
+. "${CLAUDE_PLUGIN_ROOT_CORE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../core" && pwd -P)}/hooks/lib/gate-lib.sh" || { echo "explorability-gate.sh: cannot source gate-lib.sh" >&2; exit 2; }
 gate_trap_fail_closed
 set -uo pipefail
 gate_kill_switch_active "${OBSERVABILITY_EXPLORABILITY_GATE_OFF:-}" || { trap - EXIT; exit 0; }
@@ -100,6 +100,7 @@ try:
     RECORD_RE = re.compile(r'^docs/issue-[0-9]+/reports/observability\.md$')
 
     path = None
+    is_bash = False
     if tool in ("Write", "Edit", "MultiEdit"):
         p = ti.get("file_path")
         if isinstance(p, str) and p:
@@ -108,6 +109,15 @@ try:
         p = ti.get("notebook_path")
         if isinstance(p, str) and p:
             path = p
+    elif tool == "Bash":
+        cmd = ti.get("command")
+        if isinstance(cmd, str) and cmd:
+            for token in gate_lib.gate_bash_write_targets(cmd):
+                cand_rel = gate_lib.gate_normalize_path(root, token)
+                if cand_rel and (PROPOSAL_RE.match(cand_rel) or RECORD_RE.match(cand_rel)):
+                    path = token
+                    is_bash = True
+                    break
     if path is None:
         sys.exit(0)
 
@@ -116,6 +126,12 @@ try:
         sys.exit(0)
     if not (PROPOSAL_RE.match(rel) or RECORD_RE.match(rel)):
         sys.exit(0)
+    if is_bash:
+        deny(
+            "this Bash command appears to write %s; the produces-shape check cannot inspect "
+            "a Bash-authored write's resulting content — use Write/Edit/MultiEdit for this "
+            "path instead." % rel
+        )
     r = posixpath.join(root, rel) if rel else root
 
     phase = 1 if PROPOSAL_RE.match(rel) else 2

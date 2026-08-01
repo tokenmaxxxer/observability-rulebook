@@ -2,7 +2,7 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 GATE="$HERE/../observability-explorability/hooks/explorability-gate.sh"
-export CLAUDE_PLUGIN_ROOT_CORE="/home/jwjung/tokenmaxxxer/tokenmaxxxer-core/core"
+export CLAUDE_PLUGIN_ROOT_CORE="${CLAUDE_PLUGIN_ROOT_CORE:-/home/jwjung/.claude/plugins/marketplaces/tokenmaxxxer/runs/rulebooks/tokenmaxxxer-core/core}"
 pass=0; fail=0
 report() { if [ "$2" = "$1" ]; then pass=$((pass+1)); printf 'ok     %-34s %s\n' "$3" "$2"; else fail=$((fail+1)); printf 'FAIL   %-34s want=%s got=%s\n' "$3" "$1" "$2"; fi; }
 
@@ -159,6 +159,35 @@ json='{"tool_name":"Write","tool_input":{"file_path":"./docs/issue-7/reports/obs
 printf '%s' "$json" | env CLAUDE_PROJECT_DIR="$td" /bin/bash "$GATE" >/dev/null 2>&1
 rc=$?; case "$rc" in 0) got=allow ;; 2) got=deny ;; *) got="exit-$rc" ;; esac
 rm -rf "$td"; report allow "$got" dot-relative-path-variant
+
+# (g) missing core lib — CLAUDE_PLUGIN_ROOT_CORE points at a nonexistent
+#     path; gate must fail closed (deny/exit-2).
+td="$(mkrepo docs/issue-7/reports/observability.md)"
+json='{"tool_name":"Write","tool_input":{"file_path":"docs/issue-7/reports/observability.md","content":"애드혹 쿼리 예시: SELECT * FROM spans;"}}'
+printf '%s' "$json" | env CLAUDE_PROJECT_DIR="$td" CLAUDE_PLUGIN_ROOT_CORE="/nonexistent/no-such-core" /bin/bash "$GATE" >/dev/null 2>&1
+rc=$?; case "$rc" in 0) got=allow ;; 2) got=deny ;; *) got="exit-$rc" ;; esac
+rm -rf "$td"; report deny "$got" missing-core-lib-fails-closed
+
+# (h) Bash-write coverage — a Bash command targeting the guarded
+#     proposal/record path must deny (produces-shape check cannot inspect
+#     Bash-authored content); an unrelated Bash command must allow.
+td="$(mkrepo docs/issue-7/reports/observability.md)"
+json='{"tool_name":"Bash","tool_input":{"command":"echo hi >> docs/issue-7/reports/observability.md"}}'
+printf '%s' "$json" | env CLAUDE_PROJECT_DIR="$td" /bin/bash "$GATE" >/dev/null 2>&1
+rc=$?; case "$rc" in 0) got=allow ;; 2) got=deny ;; *) got="exit-$rc" ;; esac
+rm -rf "$td"; report deny "$got" bash-write-record-path-denied
+
+td="$(mkrepo docs/issue-7/proposals/x-observability.md)"
+json='{"tool_name":"Bash","tool_input":{"command":"cat docs/issue-7/proposals/x-observability.md > /tmp/whatever"}}'
+printf '%s' "$json" | env CLAUDE_PROJECT_DIR="$td" /bin/bash "$GATE" >/dev/null 2>&1
+rc=$?; case "$rc" in 0) got=allow ;; 2) got=deny ;; *) got="exit-$rc" ;; esac
+rm -rf "$td"; report deny "$got" bash-write-proposal-path-denied
+
+td="$(mkrepo docs/issue-7/reports/observability.md)"
+json='{"tool_name":"Bash","tool_input":{"command":"ls -la docs/issue-7/reports/"}}'
+printf '%s' "$json" | env CLAUDE_PROJECT_DIR="$td" /bin/bash "$GATE" >/dev/null 2>&1
+rc=$?; case "$rc" in 0) got=allow ;; 2) got=deny ;; *) got="exit-$rc" ;; esac
+rm -rf "$td"; report allow "$got" bash-unrelated-command-allowed
 
 printf '\n== %d passed, %d failed ==\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

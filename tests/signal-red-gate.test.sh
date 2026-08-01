@@ -2,7 +2,7 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 GATE="$HERE/../observability-signal-red/hooks/signal-red-gate.sh"
-export CLAUDE_PLUGIN_ROOT_CORE="/home/jwjung/tokenmaxxxer/tokenmaxxxer-core/core"
+export CLAUDE_PLUGIN_ROOT_CORE="${CLAUDE_PLUGIN_ROOT_CORE:-/home/jwjung/.claude/plugins/marketplaces/tokenmaxxxer/runs/rulebooks/tokenmaxxxer-core/core}"
 pass=0; fail=0
 report() { if [ "$2" = "$1" ]; then pass=$((pass+1)); printf 'ok     %-34s %s\n' "$3" "$2"; else fail=$((fail+1)); printf 'FAIL   %-34s want=%s got=%s\n' "$3" "$1" "$2"; fi; }
 
@@ -145,6 +145,19 @@ run_abs_and_dotrel() {
   rm -rf "$td"; report "$want" "$got" "dot-relative-path-variant"
 }
 run_abs_and_dotrel allow docs/issue-7/reports/observability.md "$RED_PASS"
+
+# --- (g) missing/invalid CLAUDE_PLUGIN_ROOT_CORE fails closed ---
+td="$(cd "$(mktemp -d)" && pwd -P)"; git init -q "$td"
+printf '%s' "$FAILING_PAYLOAD" | env CLAUDE_PROJECT_DIR="$td" CLAUDE_PLUGIN_ROOT_CORE=/nonexistent/path/core /bin/bash "$GATE" >/dev/null 2>&1
+rc=$?; case "$rc" in 0) got=allow ;; 2) got=deny ;; *) got="exit-$rc" ;; esac
+rm -rf "$td"; report deny "$got" missing-core-fails-closed
+
+# --- (h) Bash write coverage ---
+TOOL_NAME=Bash run deny bash-write-to-record docs/issue-7/reports/observability.md '' \
+  "$(python3 -c 'import json; print(json.dumps({"command":"echo hi > docs/issue-7/reports/observability.md"}))')"
+
+TOOL_NAME=Bash run allow bash-write-unrelated docs/issue-7/reports/observability.md '' \
+  "$(python3 -c 'import json; print(json.dumps({"command":"echo hi > docs/issue-7/other.md"}))')"
 
 printf '\n== %d passed, %d failed ==\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
