@@ -2,7 +2,7 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 GATE="$HERE/../observability-signal-use/hooks/signal-use-gate.sh"
-export CLAUDE_PLUGIN_ROOT_CORE="/home/jwjung/tokenmaxxxer/tokenmaxxxer-core/core"
+export CLAUDE_PLUGIN_ROOT_CORE="${CLAUDE_PLUGIN_ROOT_CORE:-/home/jwjung/.claude/plugins/marketplaces/tokenmaxxxer/runs/rulebooks/tokenmaxxxer-core/core}"
 pass=0; fail=0
 report() { if [ "$2" = "$1" ]; then pass=$((pass+1)); printf 'ok     %-34s %s\n' "$3" "$2"; else fail=$((fail+1)); printf 'FAIL   %-34s want=%s got=%s\n' "$3" "$1" "$2"; fi; }
 
@@ -147,6 +147,27 @@ run_raw allow abs-path-variant "$payload_f_abs" "$td_f"
 payload_f_rel="$(mk_write_payload "./docs/issue-7/reports/observability.md" 'USE 채택. utilization: cpu 사용률. saturation: queue depth. errors: OOM count.' "$td_f")"
 run_raw allow dot-relative-path-variant "$payload_f_rel" "$td_f"
 rm -rf "$td_f"
+
+# ============================================================
+# g. missing core lib — must fail closed (deny/exit-2)
+# ============================================================
+td_g="$(mkeditfixture '## USE
+utilization: cpu 사용률. saturation: queue depth. errors: OOM count.')"
+payload_g="$(mk_write_payload docs/issue-7/reports/observability.md 'USE 채택. utilization: cpu 사용률. saturation: queue depth. errors: OOM count.' "$td_g")"
+run_raw deny missing-core-lib-fails-closed "$payload_g" "$td_g" 'CLAUDE_PLUGIN_ROOT_CORE=/nonexistent/path/does/not/exist'
+rm -rf "$td_g"
+
+# ============================================================
+# h. Bash-write coverage — targeted write denies, unrelated allows
+# ============================================================
+td_h="$(mkeditfixture '## USE
+utilization: cpu 사용률. saturation: queue depth. errors: OOM count.')"
+payload_h_target="$(python3 -c 'import json,sys; print(json.dumps({"tool_name":"Bash","tool_input":{"command":"echo hi > docs/issue-7/reports/observability.md"},"cwd":sys.argv[1]}))' "$td_h")"
+run_raw deny bash-write-targets-record "$payload_h_target" "$td_h"
+
+payload_h_other="$(python3 -c 'import json,sys; print(json.dumps({"tool_name":"Bash","tool_input":{"command":"echo hi > docs/issue-7/other.md"},"cwd":sys.argv[1]}))' "$td_h")"
+run_raw allow bash-write-unrelated-path "$payload_h_other" "$td_h"
+rm -rf "$td_h"
 
 printf '\n== %d passed, %d failed ==\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

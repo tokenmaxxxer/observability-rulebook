@@ -2,7 +2,7 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 GATE="$HERE/../observability-phase-trace/hooks/phase-trace-gate.sh"
-export CLAUDE_PLUGIN_ROOT_CORE="/home/jwjung/tokenmaxxxer/tokenmaxxxer-core/core"
+export CLAUDE_PLUGIN_ROOT_CORE="${CLAUDE_PLUGIN_ROOT_CORE:-/home/jwjung/.claude/plugins/marketplaces/tokenmaxxxer/runs/rulebooks/tokenmaxxxer-core/core}"
 pass=0; fail=0
 report() { if [ "$2" = "$1" ]; then pass=$((pass+1)); printf 'ok     %-34s %s\n' "$3" "$2"; else fail=$((fail+1)); printf 'FAIL   %-34s want=%s got=%s\n' "$3" "$1" "$2"; fi; }
 
@@ -107,6 +107,27 @@ USE로 변경. 이유: 표면이 resource-bound로 재분류되었기 때문.
 
 Trailing unrelated paragraph.'
 run allow adjacency-near-passes docs/issue-7/reports/observability.md "$near_content" '{"issue":"7","methodology_named":true}'
+
+# --- g. corrupt state file: fail closed (deny), not skip ---
+run deny  corrupt-state-fails-closed docs/issue-7/reports/observability.md 'RED 채택.' 'not valid json'
+
+# --- h. missing core: fail closed (deny) ---
+missing_core_test() {
+  td="$(cd "$(mktemp -d)" && pwd -P)"; git init -q "$td"; mkdir -p "$td/docs/issue-7/reports"
+  ti="$(python3 -c 'import json,sys; print(json.dumps({"file_path": sys.argv[1], "content": sys.argv[2]}))' "docs/issue-7/reports/observability.md" 'RED 채택.')"
+  payload="$(python3 -c 'import json,sys; print(json.dumps({"tool_name": "Write", "tool_input": json.loads(sys.argv[1]), "cwd": sys.argv[2]}))' "$ti" "$td")"
+  printf '%s' "$payload" \
+    | env CLAUDE_PROJECT_DIR="$td" CLAUDE_PLUGIN_ROOT_CORE="/nonexistent/core/path" OBSERVABILITY_PHASE_TRACE_GATE_OFF='' /bin/bash "$GATE" >/dev/null 2>&1
+  rc=$?; case "$rc" in 0) got=allow ;; 2) got=deny ;; *) got="exit-$rc" ;; esac
+  rm -rf "$td"; report deny "$got" missing-core-fails-closed
+}
+missing_core_test
+
+# --- i. Bash-write coverage ---
+bash_ti_record='{"command":"printf x > docs/issue-7/reports/observability.md"}'
+run deny  bash-write-record-denied docs/issue-7/reports/observability.md '' '{"issue":"7","methodology_named":true}' "$bash_ti_record" Bash
+bash_ti_unrelated='{"command":"printf x > docs/issue-7/reports/other.md"}'
+run allow bash-write-unrelated-allowed docs/issue-7/reports/other.md '' '{"issue":"7","methodology_named":true}' "$bash_ti_unrelated" Bash
 
 printf '\n== %d passed, %d failed ==\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

@@ -2,7 +2,7 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 GATE="$HERE/../observability-cardinality-budget/hooks/cardinality-budget-gate.sh"
-export CLAUDE_PLUGIN_ROOT_CORE="${CLAUDE_PLUGIN_ROOT_CORE:-/home/jwjung/tokenmaxxxer/tokenmaxxxer-core/core}"
+export CLAUDE_PLUGIN_ROOT_CORE="${CLAUDE_PLUGIN_ROOT_CORE:-/home/jwjung/.claude/plugins/marketplaces/tokenmaxxxer/runs/rulebooks/tokenmaxxxer-core/core}"
 pass=0; fail=0
 report() { if [ "$2" = "$1" ]; then pass=$((pass+1)); printf 'ok     %-34s %s\n' "$3" "$2"; else fail=$((fail+1)); printf 'FAIL   %-34s want=%s got=%s\n' "$3" "$1" "$2"; fi; }
 
@@ -127,6 +127,23 @@ run_dotrel() {
   rm -rf "$td"; report "$want" "$got" "$name"
 }
 run_dotrel deny path-dot-relative docs/issue-7/reports/observability.md '카디널리티: N/A.'
+
+# --- g. missing core (CLAUDE_PLUGIN_ROOT_CORE points at nonexistent path) ---
+run deny missing-core docs/issue-7/reports/observability.md '카디널리티: user_id는 hash 처리.' '' 'CLAUDE_PLUGIN_ROOT_CORE=/nonexistent/does/not/exist/core'
+
+# --- h. Bash-write coverage ---
+run_bash() {
+  local want="$1" name="$2" cmd="$3"
+  td="$(cd "$(mktemp -d)" && pwd -P)"; _mark "$td"
+  ti="$(python3 -c 'import json,sys; print(json.dumps({"command":sys.argv[1]}))' "$cmd")"
+  printf '{"tool_name":"Bash","tool_input":%s,"cwd":"%s"}' "$ti" "$td" \
+    | env CLAUDE_PROJECT_DIR="$td" /bin/bash "$GATE" >/dev/null 2>&1
+  rc=$?; case "$rc" in 0) got=allow ;; 2) got=deny ;; *) got="exit-$rc" ;; esac
+  rm -rf "$td"; report "$want" "$got" "$name"
+}
+run_bash deny  bash-write-record  'echo "카디널리티: user_id는 hash 처리." > docs/issue-7/reports/observability.md'
+run_bash deny  bash-write-proposal 'echo "예비 고카디널리티 후보: user_id." > docs/issue-7/proposals/x-observability.md'
+run_bash allow bash-write-unrelated 'echo "hello" > docs/issue-7/reports/pricing.md'
 
 printf '\n== %d passed, %d failed ==\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

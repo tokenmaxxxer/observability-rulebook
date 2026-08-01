@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-. "${CLAUDE_PLUGIN_ROOT_CORE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../core" && pwd -P)}/hooks/lib/gate-lib.sh"
+. "${CLAUDE_PLUGIN_ROOT_CORE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../core" && pwd -P)}/hooks/lib/gate-lib.sh" || { echo "phase-trace-gate.sh: cannot source gate-lib.sh" >&2; exit 2; }
 gate_trap_fail_closed
 set -uo pipefail
 gate_kill_switch_active "${OBSERVABILITY_PHASE_TRACE_GATE_OFF:-}" || { trap - EXIT; exit 0; }
@@ -99,12 +99,22 @@ try:
     # whose full resulting content we can read. Everything else is out of
     # scope.
     path = None
+    is_bash = False
     if tool in ("Write", "Edit", "MultiEdit"):
         p = ti.get("file_path")
         if isinstance(p, str) and p: path = p
     elif tool == "NotebookEdit":
         p = ti.get("notebook_path")
         if isinstance(p, str) and p: path = p
+    elif tool == "Bash":
+        cmd = ti.get("command")
+        if isinstance(cmd, str) and cmd:
+            for token in gate_lib.gate_bash_write_targets(cmd):
+                cand_rel = gate_lib.gate_normalize_path(root, token)
+                if cand_rel and RECORD_RE.match(cand_rel):
+                    path = token
+                    is_bash = True
+                    break
     if path is None:
         sys.exit(0)
 
@@ -113,6 +123,12 @@ try:
         sys.exit(0)
     if not RECORD_RE.match(rel):
         sys.exit(0)  # not the phase-2 observability record — not this gate's business
+    if is_bash:
+        deny(
+            "this Bash command appears to write %s; the produces-shape check cannot inspect "
+            "a Bash-authored write's resulting content — use Write/Edit/MultiEdit for this "
+            "path instead." % rel
+        )
     r = posixpath.join(root, rel) if rel else root
     m = RECORD_RE.match(rel)
     issue_n = m.group(1)
@@ -130,12 +146,11 @@ try:
         with open(state_path, encoding="utf-8-sig") as fh:
             state = json.load(fh)
     except (OSError, ValueError):
-        # State file exists but is unreadable/invalid — treat as no usable state, informational only.
-        sys.stderr.write(
-            "%s: note — .observability-phase1-methods/%s.json exists but could not be parsed; "
-            "phase-trace check skipped (informational only, not a denial).\n" % (role, issue_n)
+        deny(
+            ".observability-phase1-methods/%s.json exists but could not be parsed "
+            "(corrupt or invalid JSON); failing closed on the phase-trace check "
+            "rather than silently skipping it." % issue_n
         )
-        sys.exit(0)
 
     if not (isinstance(state, dict) and state.get("methodology_named") is True):
         # State exists but doesn't assert a named methodology — nothing to trace.
