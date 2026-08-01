@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-__fc(){ rc=$?; if [ "$rc" != 0 ] && [ "$rc" != 2 ]; then echo "fail-closed: gate aborted (rc=$rc)" >&2; exit 2; fi; }
-trap __fc EXIT
-# PreToolUse gate (Write|Edit|MultiEdit) — role-owned, observability-phase-trace only.
+. "${CLAUDE_PLUGIN_ROOT_CORE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../core" && pwd -P)}/hooks/lib/gate-lib.sh"
+gate_trap_fail_closed
+set -uo pipefail
+gate_kill_switch_active "${OBSERVABILITY_PHASE_TRACE_GATE_OFF:-}" || { trap - EXIT; exit 0; }
+
+# PreToolUse gate (Write|Edit|MultiEdit|NotebookEdit) — role-owned, observability-phase-trace only.
 #
 # On a write whose resolved target is docs/issue-<n>/reports/observability.md
 # (the phase-2 record), read the state file that `observability-methodology-
@@ -12,22 +15,17 @@ trap __fc EXIT
 # a writer.
 #
 # - No state file: informational only — never deny, exit 0 (optionally warn).
-# - State file present with methodology_named:true: if the phase-2 text
-#   contains a deviation marker ("이탈"/"deviat"/"switch"/"변경") anywhere,
-#   it must also contain a reason marker ("because"/"때문"/"이유"/"reason")
-#   somewhere in the text — otherwise deny (deviation stated without reason).
-#   No deviation marker present at all -> nothing to check -> allow.
+# - State file present with methodology_named:true: every line containing a
+#   deviation marker ("이탈"/"deviat"/"switch"/"변경") must have a reason
+#   marker ("because"/"때문"/"이유"/"reason") nearby (same paragraph, i.e.
+#   the contiguous run of non-blank lines around it) — otherwise deny
+#   (deviation stated without an adjacent reason). No deviation marker
+#   present at all -> nothing to check -> allow.
 #
 # Kill switch: export OBSERVABILITY_PHASE_TRACE_GATE_OFF=1
-set -uo pipefail
 
 role="${CLAUDE_ROLE:-observability}"
-deny() { echo "${role}: refused — $1" >&2; exit 2; }
-
-case "${OBSERVABILITY_PHASE_TRACE_GATE_OFF:-}" in
-  ""|0|false|no|off) ;;
-  *) exit 0 ;;
-esac
+deny() { gate_deny "$role" "$1"; }
 
 command -v python3 >/dev/null 2>&1 || deny "phase-trace-gate.sh requires python3, which is not on PATH; denying rather than guessing."
 
@@ -49,13 +47,11 @@ _plausible() { [ -n "$1" ] && [ -d "$1" ] && { [ -e "$1/.git" ] || [ -f "$1/docs
 _under() {
   [ -z "$2" ] && return 0
   python3 -c '
-import os,posixpath,sys
-r,t=sys.argv[1],sys.argv[2]
-try: rr=posixpath.normpath(os.path.realpath(r).replace("\\","/"))
-except Exception: sys.exit(1)
-n=t.replace("\\","/"); a=n if posixpath.isabs(n) else posixpath.join(rr,n)
-a=posixpath.normpath(a); real=posixpath.normpath(os.path.realpath(a).replace("\\","/"))
-sys.exit(0 if (real==rr or real.startswith(rr+"/")) else 1)
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("gate_lib", os.environ["GATE_LIB_PY"])
+gate_lib = importlib.util.module_from_spec(spec); spec.loader.exec_module(gate_lib)
+root = os.path.realpath(sys.argv[1])
+sys.exit(0 if gate_lib.gate_normalize_path(root, sys.argv[2]) is not None else 1)
 ' "$1" "$2"
 }
 
@@ -70,7 +66,7 @@ fi
 [ -z "$root" ] && root="$(git -C "$(pwd -P)" rev-parse --show-toplevel 2>/dev/null || true)"
 [ -z "$root" ] && deny "no project root could be determined; failing closed (phase-trace check cannot run)."
 
-PT_PAYLOAD="$payload" PT_ROOT="$root" PT_ROLE="$role" \
+PT_PAYLOAD="$payload" PT_ROOT="$root" PT_ROLE="$role" GLPY="$GATE_LIB_PY" \
 python3 <<'PY'
 import sys as _fc_sys  # fail-closed-on-internal-error
 try:
@@ -78,16 +74,18 @@ try:
 
     role = os.environ["PT_ROLE"]
 
+    import importlib.util
+    _spec = importlib.util.spec_from_file_location("gate_lib", os.environ["GLPY"])
+    gate_lib = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(gate_lib)
+
     def deny(m):
         sys.stderr.write("%s: refused — %s\n" % (role, m)); sys.exit(2)
 
+    def allow():
+        sys.exit(0)
+
     raw = os.environ.get("PT_PAYLOAD", "")
-    try:
-        ev = json.loads(raw) if raw else {}
-    except ValueError:
-        deny("the tool-call payload is not valid JSON; the gate cannot judge phase-trace on an unparseable write.")
-    if not isinstance(ev, dict):
-        deny("the tool-call payload is not a JSON object; failing closed on phase-trace.")
+    ev = gate_lib.gate_parse_json_or_deny(raw, deny)
 
     tool = ev.get("tool_name")
     ti = ev.get("tool_input")
@@ -97,32 +95,26 @@ try:
     root = posixpath.normpath(os.environ["PT_ROOT"].replace("\\", "/"))
     RECORD_RE = re.compile(r'^docs/issue-([0-9]+)/reports/observability\.md$')
 
-    def resolve(p):
-        n = p.replace("\\", "/")
-        a = n if posixpath.isabs(n) else posixpath.join(root, n)
-        a = posixpath.normpath(a)
-        try:
-            return posixpath.normpath(os.path.realpath(a).replace("\\", "/"))
-        except OSError:
-            return a
-
-    # Only Write/Edit/MultiEdit reach the record in a form whose full
-    # resulting content we can read. Everything else is out of scope.
+    # Only Write/Edit/MultiEdit/NotebookEdit reach the record in a form
+    # whose full resulting content we can read. Everything else is out of
+    # scope.
     path = None
     if tool in ("Write", "Edit", "MultiEdit"):
         p = ti.get("file_path")
-        if isinstance(p, str) and p:
-            path = p
+        if isinstance(p, str) and p: path = p
+    elif tool == "NotebookEdit":
+        p = ti.get("notebook_path")
+        if isinstance(p, str) and p: path = p
     if path is None:
         sys.exit(0)
 
-    r = resolve(path)
-    if not r.startswith(root + "/"):
+    rel = gate_lib.gate_normalize_path(root, path)
+    if rel is None:
         sys.exit(0)
-    rel = r[len(root):].lstrip("/")
-    m = RECORD_RE.match(rel)
-    if not m:
+    if not RECORD_RE.match(rel):
         sys.exit(0)  # not the phase-2 observability record — not this gate's business
+    r = posixpath.join(root, rel) if rel else root
+    m = RECORD_RE.match(rel)
     issue_n = m.group(1)
 
     state_path = os.path.join(root, ".observability-phase1-methods", "%s.json" % issue_n)
@@ -157,53 +149,50 @@ try:
         except OSError:
             deny("%s exists but cannot be read; failing closed on the phase-trace check." % rel)
 
-    new_text = None
-    if tool == "Write":
-        c = ti.get("content")
-        if isinstance(c, str):
-            new_text = c
-    elif tool == "Edit":
-        o, n = ti.get("old_string"), ti.get("new_string")
-        if isinstance(o, str) and isinstance(n, str) and current is not None and o in current:
-            new_text = current.replace(o, n, 1)
-    elif tool == "MultiEdit":
-        edits = ti.get("edits")
-        text = current
-        if isinstance(edits, list) and text is not None:
-            ok = True
-            for e in edits:
-                if not isinstance(e, dict):
-                    ok = False; break
-                o, n = e.get("old_string"), e.get("new_string")
-                if not isinstance(o, str) or not isinstance(n, str) or o not in text:
-                    ok = False; break
-                text = text.replace(o, n, 1)
-            if ok:
-                new_text = text
-
-    if new_text is None:
+    new_text, ok = gate_lib.gate_reconstruct_write(tool, ti, current)
+    if not ok:
         deny(
-            "this write targets %s but the gate cannot determine the resulting content "
-            "from the tool input (tool=%r). Write the full record with Write, or use an "
-            "Edit/MultiEdit whose old_string matches, so the phase-trace check can run." % (rel, tool)
+            "this write targets %s but the gate cannot determine the resulting content from the tool input "
+            "(tool=%r, replace_all honored). Write the full file with Write, or use an Edit/MultiEdit whose "
+            "old_string matches, so the shape can be checked." % (rel, tool)
         )
-
-    low = new_text.lower()
-
-    def has_any(*needles):
-        return any(nd in low for nd in needles)
 
     deviation_markers = ("이탈", "deviat", "switch", "변경")
     reason_markers = ("because", "때문", "이유", "reason")
 
-    if has_any(*deviation_markers) and not has_any(*reason_markers):
-        deny(
-            "record at %s claims a deviation from the phase-1 methodology (contains a deviation "
-            "marker such as '이탈'/'deviat'/'switch'/'변경') but states no reason (no '때문'/'이유'/"
-            "'because'/'reason' anywhere in the text). Per docs/issue-7/proposals/"
-            "2026-07-31-produces-methodology-hook-machine.md plugin #7, a stated deviation from the "
-            "phase-1-named methodology must carry an explicit reason." % rel
-        )
+    def has_any(line_low, *needles):
+        return any(nd in line_low for nd in needles)
+
+    lines = new_text.split("\n")
+    n = len(lines)
+    lines_low = [ln.lower() for ln in lines]
+
+    # Paragraph = contiguous run of non-blank lines. Fallback: a fixed
+    # 3-line window (line before, line itself, line after) if paragraph
+    # boundaries are degenerate against real fixture prose.
+    for i, low in enumerate(lines_low):
+        if not has_any(low, *deviation_markers):
+            continue
+        # find paragraph bounds around line i
+        start = i
+        while start > 0 and lines[start - 1].strip() != "":
+            start -= 1
+        end = i
+        while end < n - 1 and lines[end + 1].strip() != "":
+            end += 1
+        window_lo = max(0, i - 1)
+        window_hi = min(n - 1, i + 1)
+        lo = min(start, window_lo)
+        hi = max(end, window_hi)
+        nearby = "\n".join(lines_low[lo:hi + 1])
+        if not has_any(nearby, *reason_markers):
+            deny(
+                "record at %s claims a deviation from the phase-1 methodology (contains a deviation "
+                "marker such as '이탈'/'deviat'/'switch'/'변경') near line %d but states no nearby reason "
+                "(no '때문'/'이유'/'because'/'reason' in the same paragraph/window). Per docs/issue-7/"
+                "proposals/2026-07-31-produces-methodology-hook-machine.md plugin #7, a stated deviation "
+                "from the phase-1-named methodology must carry an explicit, adjacent reason." % (rel, i + 1)
+            )
 
     sys.exit(0)
 except Exception as _fc_e:  # fail-closed-on-internal-error

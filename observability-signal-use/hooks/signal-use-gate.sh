@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-__fc(){ rc=$?; if [ "$rc" != 0 ] && [ "$rc" != 2 ]; then echo "fail-closed: gate aborted (rc=$rc)" >&2; exit 2; fi; }
-trap __fc EXIT
-# PreToolUse gate (Write|Edit|MultiEdit) — observability-signal-use only.
+. "${CLAUDE_PLUGIN_ROOT_CORE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../core" && pwd -P)}/hooks/lib/gate-lib.sh"
+gate_trap_fail_closed
+set -uo pipefail
+gate_kill_switch_active "${OBSERVABILITY_SIGNAL_USE_GATE_OFF:-}" || { trap - EXIT; exit 0; }
+
+# PreToolUse gate (Write|Edit|MultiEdit|NotebookEdit) — observability-signal-use only.
 #
 # On a write whose resolved target is docs/issue-<n>/reports/observability.md
 # (the phase-2 record), parse the PROPOSED content. If the record does not
@@ -9,18 +12,15 @@ trap __fc EXIT
 # is a no-op (another signal plugin, e.g. observability-signal-red or
 # observability-signal-golden, may own that record). If USE is mentioned as
 # adopted, require all three USE signal classes (utilization/saturation/
-# errors) to appear, each with SOME concrete mention.
+# errors) to appear within the record's USE-topic section, each with SOME
+# concrete mention.
 #
-# Kill switch: export OBSERVABILITY_SIGNAL_USE_GATE_OFF=1
-set -uo pipefail
+# Kill switch: export OBSERVABILITY_SIGNAL_USE_GATE_OFF=1 (or true/yes/on,
+# case-insensitive). Any other value, including unrecognized garbage,
+# leaves the gate active (fail closed on kill-switch typos).
 
 role="${CLAUDE_ROLE:-observability-signal-use}"
-deny() { echo "${role}: refused — $1" >&2; exit 2; }
-
-case "${OBSERVABILITY_SIGNAL_USE_GATE_OFF:-}" in
-  ""|0|false|no|off) ;;
-  *) exit 0 ;;
-esac
+deny() { gate_deny "$role" "$1"; }
 
 command -v python3 >/dev/null 2>&1 || deny "signal-use-gate.sh requires python3, which is not on PATH; denying rather than guessing."
 
@@ -42,13 +42,11 @@ _plausible() { [ -n "$1" ] && [ -d "$1" ] && { [ -e "$1/.git" ] || [ -f "$1/docs
 _under() {
   [ -z "$2" ] && return 0
   python3 -c '
-import os,posixpath,sys
-r,t=sys.argv[1],sys.argv[2]
-try: rr=posixpath.normpath(os.path.realpath(r).replace("\\","/"))
-except Exception: sys.exit(1)
-n=t.replace("\\","/"); a=n if posixpath.isabs(n) else posixpath.join(rr,n)
-a=posixpath.normpath(a); real=posixpath.normpath(os.path.realpath(a).replace("\\","/"))
-sys.exit(0 if (real==rr or real.startswith(rr+"/")) else 1)
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("gate_lib", os.environ["GATE_LIB_PY"])
+gate_lib = importlib.util.module_from_spec(spec); spec.loader.exec_module(gate_lib)
+root = os.path.realpath(sys.argv[1])
+sys.exit(0 if gate_lib.gate_normalize_path(root, sys.argv[2]) is not None else 1)
 ' "$1" "$2"
 }
 
@@ -63,7 +61,7 @@ fi
 [ -z "$root" ] && root="$(git -C "$(pwd -P)" rev-parse --show-toplevel 2>/dev/null || true)"
 [ -z "$root" ] && deny "no project root could be determined; failing closed (signal-use check cannot run)."
 
-SUG_PAYLOAD="$payload" SUG_ROOT="$root" SUG_ROLE="$role" \
+SUG_PAYLOAD="$payload" SUG_ROOT="$root" SUG_ROLE="$role" GLPY="$GATE_LIB_PY" \
 python3 <<'PY'
 import sys as _fc_sys  # fail-closed-on-internal-error
 try:
@@ -71,16 +69,18 @@ try:
 
     role = os.environ["SUG_ROLE"]
 
+    import importlib.util
+    _spec = importlib.util.spec_from_file_location("gate_lib", os.environ["GLPY"])
+    gate_lib = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(gate_lib)
+
     def deny(m):
         sys.stderr.write("%s: refused — %s\n" % (role, m)); sys.exit(2)
 
+    def allow():
+        sys.exit(0)
+
     raw = os.environ.get("SUG_PAYLOAD", "")
-    try:
-        ev = json.loads(raw) if raw else {}
-    except ValueError:
-        deny("the tool-call payload is not valid JSON; the gate cannot judge signal-use shape on an unparseable write.")
-    if not isinstance(ev, dict):
-        deny("the tool-call payload is not a JSON object; failing closed on signal-use shape.")
+    ev = gate_lib.gate_parse_json_or_deny(raw, deny)
 
     tool = ev.get("tool_name")
     ti = ev.get("tool_input")
@@ -90,29 +90,24 @@ try:
     root = posixpath.normpath(os.environ["SUG_ROOT"].replace("\\", "/"))
     RECORD_RE = re.compile(r'^docs/issue-[0-9]+/reports/observability\.md$')
 
-    def resolve(p):
-        n = p.replace("\\", "/")
-        a = n if posixpath.isabs(n) else posixpath.join(root, n)
-        a = posixpath.normpath(a)
-        try:
-            return posixpath.normpath(os.path.realpath(a).replace("\\", "/"))
-        except OSError:
-            return a
-
     path = None
     if tool in ("Write", "Edit", "MultiEdit"):
         p = ti.get("file_path")
         if isinstance(p, str) and p:
             path = p
+    elif tool == "NotebookEdit":
+        p = ti.get("notebook_path")
+        if isinstance(p, str) and p:
+            path = p
     if path is None:
         sys.exit(0)
 
-    r = resolve(path)
-    if not r.startswith(root + "/"):
+    rel = gate_lib.gate_normalize_path(root, path)
+    if rel is None:
         sys.exit(0)
-    rel = r[len(root):].lstrip("/")
     if not RECORD_RE.match(rel):
         sys.exit(0)  # not the phase-2 observability record — not this gate's business
+    r = posixpath.join(root, rel) if rel else root
 
     current = None
     if os.path.isfile(r):
@@ -122,59 +117,75 @@ try:
         except OSError:
             deny("%s exists but cannot be read; failing closed on the signal-use check." % rel)
 
-    new_text = None
-    if tool == "Write":
-        c = ti.get("content")
-        if isinstance(c, str):
-            new_text = c
-    elif tool == "Edit":
-        o, n = ti.get("old_string"), ti.get("new_string")
-        if isinstance(o, str) and isinstance(n, str) and current is not None and o in current:
-            new_text = current.replace(o, n, 1)
-    elif tool == "MultiEdit":
-        edits = ti.get("edits")
-        text = current
-        if isinstance(edits, list) and text is not None:
-            ok = True
-            for e in edits:
-                if not isinstance(e, dict):
-                    ok = False; break
-                o, n = e.get("old_string"), e.get("new_string")
-                if not isinstance(o, str) or not isinstance(n, str) or o not in text:
-                    ok = False; break
-                text = text.replace(o, n, 1)
-            if ok:
-                new_text = text
-
-    if new_text is None:
+    new_text, ok = gate_lib.gate_reconstruct_write(tool, ti, current)
+    if not ok:
         deny(
-            "this write targets %s but the gate cannot determine the resulting content "
-            "from the tool input (tool=%r). Write the full record with Write, or use an "
-            "Edit/MultiEdit whose old_string matches, so the signal-use shape can be checked." % (rel, tool)
+            "this write targets %s but the gate cannot determine the resulting content from the tool input "
+            "(tool=%r, replace_all honored). Write the full file with Write, or use an Edit/MultiEdit whose "
+            "old_string matches, so the shape can be checked." % (rel, tool)
         )
 
     low = new_text.lower()
 
-    def has_any(*needles):
-        return any(nd in low for nd in needles)
+    def has_any(text, *needles):
+        low_t = text.lower()
+        return any(nd in low_t for nd in needles)
 
     # Trigger: does this record adopt USE as the methodology for some
     # surface? Requires a specific USE-as-methodology phrase, not the bare
     # English verb "use", so ordinary prose containing "use" doesn't
-    # false-positive this gate on.
+    # false-positive this gate on. Whole-document check (cheap, low
+    # false-positive risk — detecting the methodology name itself, not
+    # judging its content).
     use_adopted = has_any(
+        new_text,
         "use method", "use(", "use 방법", "use 채택", "utilization/saturation",
         "utilization / saturation",
     )
     if not use_adopted:
         sys.exit(0)  # USE not adopted here — another signal plugin (or none) owns this record
 
+    # Section-scoped check: split on markdown heading lines and find the
+    # section whose heading matches this gate's topic ("use"). Run the
+    # three signal-presence needle checks against that section's body
+    # only, not the whole document. Fall back to a bounded 3-line window
+    # around the first topic mention if no heading matches.
+    heading_re = re.compile(r'^#{1,6}\s+(.*)$', re.MULTILINE)
+    headings = list(heading_re.finditer(new_text))
+    section_body = None
+    for i, m in enumerate(headings):
+        heading_text = m.group(1)
+        if "use" in heading_text.lower():
+            start = m.end()
+            end = headings[i + 1].start() if i + 1 < len(headings) else len(new_text)
+            section_body = new_text[start:end]
+            break
+
+    if section_body is None:
+        # Fallback: bounded 3-line window around the first topic mention.
+        lines = new_text.splitlines()
+        first_idx = None
+        for i, line in enumerate(lines):
+            if has_any(
+                line,
+                "use method", "use(", "use 방법", "use 채택",
+                "utilization/saturation", "utilization / saturation",
+            ):
+                first_idx = i
+                break
+        if first_idx is None:
+            section_body = new_text
+        else:
+            lo = max(0, first_idx - 1)
+            hi = min(len(lines), first_idx + 2)
+            section_body = "\n".join(lines[lo:hi])
+
     missing = []
-    if not has_any("utilization", "사용률"):
+    if not has_any(section_body, "utilization", "사용률"):
         missing.append("utilization (어떤 리소스 지표를 볼 것인지 명시)")
-    if not has_any("saturation", "포화", "queue", "backlog"):
+    if not has_any(section_body, "saturation", "포화", "queue", "backlog"):
         missing.append("saturation (어떤 큐/백로그 신호를 볼 것인지 명시)")
-    if not has_any("error", "에러", "오류"):
+    if not has_any(section_body, "error", "에러", "오류"):
         missing.append("errors (어떤 리소스 레벨 에러를 볼 것인지 명시)")
 
     if missing:
